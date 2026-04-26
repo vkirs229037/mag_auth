@@ -13,10 +13,7 @@ app = Flask(__name__)
 
 # Загрузка конфигурации
 def load_config():
-    env = os.getenv('ENVIRONMENT', 'dev').lower()
-    config_filename = f"config.{env}.yaml"
-    print(f"Загрузка конфига для окружения: {env} -> {config_filename}")
-
+    config_filename = f"config.yaml"
     try:
         with open(config_filename, 'r') as f:
             return yaml.safe_load(f)
@@ -29,12 +26,17 @@ def load_config():
 
 config = load_config()
 app.config.update(config)
-if not app.config["SECRET_KEY"]:
-    dotenv.load_dotenv("./.env")
-    key = os.getenv("SECRET_KEY")
-    if not key:
-        raise ValueError("no secret key provided")
-    app.config["SECRET_KEY"] = key
+dotenv.load_dotenv("./.env")
+key = os.getenv("SECRET_KEY")
+uri = os.getenv("SQLALCHEMY_DATABASE_URI")
+
+if not key:
+    raise ValueError("no secret key provided")
+if not uri:
+    raise ValueError("no database URI provided")
+
+app.config["SECRET_KEY"] = key
+app.config["SQLALCHEMY_DATABASE_URI"] = uri
 
 db = SQLAlchemy(app)
 CORS(app)
@@ -98,11 +100,11 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
-@app.route('/healthcheck', methods=['GET'])
+@app.route('/api/auth/healthcheck', methods=['GET'])
 def healthcheck():
     return jsonify({"message": "ok", "version": app.config['VERSION']})
 
-@app.route('/api/register', methods=['POST'])
+@app.route('/api/auth/register', methods=['POST'])
 def register():
     data = request.get_json()
     email = data.get('email')
@@ -121,7 +123,7 @@ def register():
         db.session.rollback()
         return jsonify({"error_code": 500, "message": str(e)}), 500
 
-@app.route('/api/login', methods=['POST'])
+@app.route('/api/auth/login', methods=['POST'])
 def login():
     data = request.get_json()
     email = data.get('email')
@@ -137,7 +139,7 @@ def login():
 
     return jsonify({"message": "Invalid credentials"}), 401
 
-@app.route('/api/me', methods=['GET'])
+@app.route('/api/auth/me', methods=['GET'])
 @token_required
 def get_me():
     user = g.current_user
@@ -149,14 +151,14 @@ def get_me():
         "created_at": user.created_at.isoformat()
     }), 200
 
-@app.route('/api/users', methods=['GET'])
+@app.route('/api/auth/users', methods=['GET'])
 @token_required
 @admin_required
 def list_users():
     users = User.query.all()
     return jsonify({"message": "ok", "users": [u.to_dict() for u in users]}), 200
 
-@app.route('/api/users/<int:user_id>', methods=['DELETE'])
+@app.route('/api/auth/users/<int:user_id>', methods=['DELETE'])
 @token_required
 @admin_required
 def delete_user(user_id):
