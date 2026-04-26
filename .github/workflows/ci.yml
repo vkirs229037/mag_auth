@@ -1,0 +1,88 @@
+name: CI/CD for auth service
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ===== Джоба 1: сборка + тесты =====
+  build-and-test:
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.14-slim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -r requirements.txt
+#          pip install pytest
+
+#      - name: Run tests
+#        run: |
+#          . .venv/bin/activate
+#          python -m pytest tests/ --junitxml=test-results.xml
+
+      - name: Upload artifact (для следующей джобы)
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-service-code
+          path: |
+            src/
+            requirements.txt
+            Dockerfile
+          # исключаем виртуальное окружение, гитигнор и т.п.
+
+  # ===== Джоба 2: сборка Docker-образа =====
+  docker-build:
+    needs: build-and-test            # зависимый план
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout current repo (Dockerfile)
+        uses: actions/checkout@v4
+
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: auth-service-code
+          path: ./build-context
+
+      # Подтягиваем конфигурации из другого репозитория
+      - name: Checkout deploy-config repo
+        uses: actions/checkout@v4
+        with:
+          repository: vkirs229037/mag_deploy   # репозиторий с конфигами
+          token: ${{ secrets.DEPLOY_CONFIG_PAT }}  # PAT с доступом
+          path: ./deploy-config
+
+      # Копируем нужные конфиги в сборочный контекст
+      - name: Prepare context with config
+        run: |
+          cp ./deploy-config/nginx/nginx.conf ./build-context/nginx.conf   # если нужно внутрь образа
+          # Или любые другие файлы (env, entrypoint и т.д.)
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./build-context
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # Версионировать можно и по-другому (latest, тег релиза)
