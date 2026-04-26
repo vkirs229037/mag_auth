@@ -102,7 +102,7 @@ def admin_required(f):
 
 @app.route('/api/auth/healthcheck', methods=['GET'])
 def healthcheck():
-    return jsonify({"message": "ok", "version": app.config['VERSION']})
+    return jsonify({"message": "all ok", "version": app.config['VERSION']})
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
