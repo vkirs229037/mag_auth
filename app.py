@@ -8,6 +8,13 @@ from flask import Flask, request, jsonify, g
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+import threading
+from datetime import datetime, timezone
+import logging
+
+SERVICE_START_TIME = datetime.now(timezone.utc)
+REQUEST_STATS = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0}
+STATS_LOCK = threading.Lock()
 
 app = Flask(__name__)
 
@@ -46,7 +53,7 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.Integer, default=2)
-    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_active = db.Column(db.Boolean, default=True)
 
     def to_dict(self):
@@ -100,9 +107,42 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
+@app.after_request
+def track_response(response):
+    """Подсчёт обработанных запросов по кодам ответов"""
+    with STATS_LOCK:
+        status = response.status_code
+        if 200 <= status < 300:
+            REQUEST_STATS["2xx"] += 1
+        elif 400 <= status < 500:
+            REQUEST_STATS["4xx"] += 1
+        elif 500 <= status < 600:
+            REQUEST_STATS["5xx"] += 1
+        else:
+            REQUEST_STATS["other"] += 1
+    return response
+
 @app.route('/api/auth/healthcheck', methods=['GET'])
 def healthcheck():
     return jsonify({"message": "all ok", "version": app.config['VERSION']})
+
+@app.route('/api/auth/stats', methods=['GET'])
+def stats():
+    """Service metrics for monitoring and healthcheck"""
+    now = datetime.now(timezone.utc)
+    uptime = (now - SERVICE_START_TIME).total_seconds()
+
+    with STATS_LOCK:
+        stats_copy = dict(REQUEST_STATS)
+
+    return jsonify({
+        "service": "auth-service",
+        "version": app.config.get('VERSION', app.config.get('service_version', 'unknown')),
+        "start_time": SERVICE_START_TIME.isoformat(),
+        "uptime_seconds": round(uptime, 2),
+        "requests": stats_copy,
+        "timestamp": now.isoformat()
+    })
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
