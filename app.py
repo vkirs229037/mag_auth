@@ -9,8 +9,13 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import json
 import logging
+import sys
+import uuid
+from pythonjsonlogger import jsonlogger
+import time
 
 SERVICE_START_TIME = datetime.now(timezone.utc)
 REQUEST_STATS = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0}
@@ -44,6 +49,32 @@ if not uri:
 
 app.config["SECRET_KEY"] = key
 app.config["SQLALCHEMY_DATABASE_URI"] = uri
+
+class RequestFormatter(jsonlogger.JsonFormatter):
+    """Добавляет контекст запроса в каждый лог"""
+    def add_fields(self, log_record, record, message_dict):
+        super().add_fields(log_record, record, message_dict)
+        log_record['timestamp'] = datetime.now(timezone.utc).isoformat()
+        log_record['level'] = record.levelname
+        log_record['service'] = "auth-service"
+        log_record['version'] = app.config.get('version', 'unknown')
+        # Добавляем request_id из g (если установлен в before_request)
+        if hasattr(g, 'request_id'):
+            log_record['request_id'] = g.request_id
+        # Добавляем пользовательский контекст, если есть
+        if hasattr(g, 'current_user') and g.current_user:
+            log_record['user_id'] = getattr(g.current_user, 'id', None)
+            log_record['user_email'] = getattr(g.current_user, 'email', None)
+
+# Настройка логгера
+log_handler = logging.StreamHandler(sys.stdout)
+log_handler.setFormatter(RequestFormatter(
+    '%(timestamp)s %(level)s %(service)s %(request_id)s %(message)s'
+))
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(log_handler)
+logger.propagate = False  # Чтобы не дублировать логи в root-логгер
 
 db = SQLAlchemy(app)
 CORS(app)
@@ -122,6 +153,39 @@ def track_response(response):
             REQUEST_STATS["other"] += 1
     return response
 
+@app.before_request
+def before_request():
+    """Генерирует request_id и логирует начало запроса"""
+    g.request_id = str(uuid.uuid4())
+    g.start_time = time.time()  # для расчёта duration
+
+    logger.info("request_started", extra={
+        "method": request.method,
+        "path": request.path,
+        "remote_addr": request.remote_addr,
+        "user_agent": request.headers.get('User-Agent', '')[:100]  # обрезаем, чтобы не засорять
+    })
+
+@app.after_request
+def after_request(response):
+    """Логирует завершение запроса с метриками"""
+    duration = time.time() - getattr(g, 'start_time', time.time())
+
+    log_data = {
+        "method": request.method,
+        "path": request.path,
+        "status_code": response.status_code,
+        "duration_ms": round(duration * 1000, 2),
+        "response_size": response.content_length or 0
+    }
+
+    if response.status_code >= 400:
+        # Логируем тело ошибки (но не успешные ответы и не авторизацию)
+        log_data["response_sample"] = response.get_data(as_text=True)[:200]
+
+    logger.info("request_completed", extra=log_data)
+    return response
+
 @app.route('/api/auth/healthcheck', methods=['GET'])
 def healthcheck():
     return jsonify({"message": "all ok", "version": app.config['VERSION']})
@@ -173,7 +237,7 @@ def login():
     if user and check_password_hash(user.password_hash, password) and user.is_active:
         token = jwt.encode({
             'user_id': user.id,
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+            'exp': datetime.utcnow() + timedelta(hours=24)
         }, app.config['SECRET_KEY'], algorithm="HS256")
         return jsonify({"message": "ok", "access_token": token}), 200
 
